@@ -31,8 +31,6 @@ paths:
                   type: string
                 app_running:
                   type: boolean
-                is_paused:
-                  type: boolean
                 ui_running:
                   type: boolean
                 num_lines:

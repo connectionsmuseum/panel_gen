@@ -29,6 +29,12 @@ from numpy import random
 from pycall import CallFile, Call, Application, Context
 from asterisk.ami import AMIClient, EventListener, AMIClientAdapter
 
+DB_DEST_CHANNEL = re.compile(r"(?<=DestChannel'\:\s.{7})([^-]*)")
+HU_DEST_CHANNEL = re.compile('(?<=DestChannel\'\:\s.{7})([^-]*)')
+RE_UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+ACCOUNT_CODE = re.compile('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+TRUNK_NXX_CODES = [722, 232, 832, 275, 365, 830, 833, 524]
+
 
 class Line():
     """
@@ -87,7 +93,7 @@ class Line():
         Returns the new value of self.timer
         """
         try:
-            if self.switch.running == False:
+            if not self.switch.running:
                 self.switch.running = True
             self.timer -= 0.10
             self.ami_tmr -= 0.10
@@ -125,28 +131,29 @@ class Line():
             logging.error("Also check the switch class for the presence of each " +
                         "trunk load variable that exists in config file.")
 
-        if term_choices == []:
+        if not term_choices:
             term_office = random.choice(NXX, p=self.switch.trunk_load)
         else:
             term_office = random.choice(term_choices)
 
         # Choose a sane number that appears on the line link or final
-        # frame of the switches that we're actually calling. If something's
-        # wrong, then assert false, so it will get caught.
+        # frame of the switches that we're actually calling.
+        station_picker_by_office = {
+            722: lambda: random.randint(Rainier.line_range[0], Rainier.line_range[1]),
+            365: lambda: random.randint(Rainier.line_range[0], Rainier.line_range[1]),
+            832: lambda: random.choice(Lakeview.line_range),
+            833: lambda: random.choice(Lakeview.line_range),
+            524: lambda: random.choice(Lakeview.line_range),
+            232: lambda: random.choice(Adams.line_range),
+            275: lambda: random.randint(Step.line_range[0], Step.line_range[1]),
+            830: lambda: random.randint(ESS3.line_range[0], ESS3.line_range[1]),
+        }
 
-        if term_office == 722 or term_office == 365:
-            term_station = random.randint(Rainier.line_range[0], Rainier.line_range[1])
-        elif term_office == 832 or term_office == 833 or term_office == 524:
-            term_station = random.choice(Lakeview.line_range)
-        elif term_office == 232:
-            term_station = random.choice(Adams.line_range)
-        elif term_office == 275:
-            term_station = random.randint(Step.line_range[0], Step.line_range[1])
-        elif term_office == 830:
-            term_station = random.randint(ESS3.line_range[0], ESS3.line_range[1])
-        else:
+        pick_station = station_picker_by_office.get(term_office)
+        if not pick_station:
             logging.error("No terminating line available for this office.")
             assert False
+        term_station = pick_station()
 
         term = str(term_office) + str(term_station)
         logging.debug('Terminating line selected: %s', term)
@@ -165,13 +172,13 @@ class Line():
 
         """
         nextchan = self.switch.newchannel(self.switch.channel_choices)
-        if nextchan == False:
+        if not nextchan:
             self.timer = random.gamma(4,4)
             return
 
         pred = ''
 
-        if self.switch.ld_capable == True:          # Set in config.
+        if self.switch.ld_capable:          # Set in config.
             pred = longdistance(self, nextchan)
 
         #channel = 'DAHDI/{}'.format(self.switch.dahdi_group) + '/wwww%s' % self.term
@@ -189,7 +196,7 @@ class Line():
         self.magictoken = str(uuid.uuid4())
 
         # Set wait time for asterisk to auto hangup.
-        vars = {'waittime': wait}
+        call_vars = {'waittime': wait}
         cid = 'panel_gen <{}>'.format(self.switch.kind)
 
         self.ami_tmr = 4
@@ -202,7 +209,7 @@ class Line():
         # Pass control of the call to the sarah_callsim context in
         # the dialplan.
         # Set accountcode to our magic UUID for use later.
-        c = Call(channel, variables=vars, callerid=cid,
+        c = Call(channel, variables=call_vars, callerid=cid,
                  account=self.magictoken)
         con = Context('sarah_callsim', pred+self.term, '1')
         cf = CallFile(c, con)
@@ -263,17 +270,11 @@ class Switch():
         self.traffic_load = "normal"
         self.lines_normal = config.getint(kind, 'lines_normal')
         self.lines_heavy = config.getint(kind, 'lines_heavy')
-        self.max_722 = float(config[kind]['max_722'])
-        self.max_232 = float(config[kind]['max_232'])
-        self.max_832 = float(config[kind]['max_832'])
-        self.max_275 = float(config[kind]['max_275'])
-        self.max_365 = float(config[kind]['max_365'])
-        self.max_830 = float(config[kind]['max_830'])
-        self.max_833 = float(config[kind]['max_833'])
-        self.max_524 = float(config[kind]['max_524'])
-        self.trunk_load = [self.max_722, self.max_232,
-                self.max_832, self.max_275, self.max_365,
-                self.max_830, self.max_833, self.max_524]
+        self.trunk_load = []
+        for nxx_code in TRUNK_NXX_CODES:
+            trunk_max = float(config[kind]['max_{}'.format(nxx_code)])
+            setattr(self, 'max_{}'.format(nxx_code), trunk_max)
+            self.trunk_load.append(trunk_max)
         self.line_range = config.get(kind, 'line_range').split(",")
         self.n_ga = config.get(kind, 'n_gamma')
         self.h_ga = config.get(kind, 'h_gamma')
@@ -305,10 +306,10 @@ class Switch():
         channels_inuse = [l.chan for l in lines]
         logging.debug('Begin channel selection')
         logging.debug("In use: %s", channels_inuse)
-        channels_avail = [c for c in channel_choices if not c in channels_inuse]
+        channels_avail = [c for c in channel_choices if c not in channels_inuse]
         logging.debug("Avail:  %s", channels_avail)
 
-        if channels_avail == []:
+        if not channels_avail:
             logging.warning("No channels available on %s. Not placing call.", self.kind)
             return False
         else:
@@ -333,13 +334,10 @@ def on_DialBegin(event, **kwargs):
     try:
         event = str(event)
 
-        DB_DestChannel = re.compile('(?<=DestChannel\'\:\s.{7})([^-]*)')
-        AccountCode = re.compile('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+        DB_DestChannel = DB_DEST_CHANNEL.findall(event)
+        AccountCode = ACCOUNT_CODE.findall(event)
 
-        DB_DestChannel = DB_DestChannel.findall(event)
-        AccountCode = AccountCode.findall(event)
-
-        if DB_DestChannel == [] or AccountCode == []:
+        if not DB_DestChannel or not AccountCode:
             # Fuckin bail out!
             logging.debug("***DialBegin regex isn't matching!***")
             return
@@ -363,19 +361,15 @@ def on_DialBegin(event, **kwargs):
 def on_DialEnd(event, **kwargs):
     """
     Callback function for DialEnd AMI events.
-
     """
 
     try:
         event = str(event)
 
-        DE_DestChannel = re.compile('(?<=DestChannel\'\:\s.{7})([^-]*)')
-        AccountCode = re.compile('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+        DE_DestChannel = DB_DEST_CHANNEL.findall(event)
+        AccountCode = ACCOUNT_CODE.findall(event)
 
-        DE_DestChannel = DE_DestChannel.findall(event)
-        AccountCode = AccountCode.findall(event)
-
-        if DE_DestChannel == [] or AccountCode == []:
+        if not DE_DestChannel or not AccountCode:
             #Outta here
             logging.debug("***DialEnd regex isn't matching!***")
             return
@@ -391,7 +385,7 @@ def on_DialEnd(event, **kwargs):
             try:
                 logging.debug("C: DialEnd bookkeeping starting on %s. Pending hangup is %s",
                              line.term, line.pending_hangup)
-                if line.pending_hangup == False:
+                if not line.pending_hangup:
                     if line.ast_status == 'Dialing':
                         line.ast_status = 'Ringing'
                         line.switch.is_dialing -= 1
@@ -431,13 +425,11 @@ def on_Hangup(event, **kwargs):
 
     try:
         event = str(event)
-        HU_DestChannel = re.compile('(?<=DestChannel\'\:\s.{7})([^-]*)')
-        AccountCode = re.compile('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 
-        AccountCode = AccountCode.findall(event)
-        HU_DestChannel = HU_DestChannel.findall(event)
+        AccountCode = ACCOUNT_CODE.findall(event)
+        HU_DestChannel = HU_DEST_CHANNEL.findall(event)
 
-        if AccountCode == []:
+        if not AccountCode:
             logging.debug("*** AccountCode didn't match on hangup***")
             return
 
@@ -501,7 +493,7 @@ def longdistance(line, chan):
     if line.kind == "1xb":
         if chan in newsenders:
             if line.term[0:3] == "832" or line.term[0:3] == "232":
-                if line.longdistance == False:
+                if not line.longdistance:
                     i = random.randint(0,10)
                     if i >= 7:
                         logging.info("ANI call being placed on %s to %s, chan %s",
@@ -512,7 +504,7 @@ def longdistance(line, chan):
                         line.longdistance = True
 
     if line.kind == "5xb":
-        too_many = sum(1 for l in lines if l.longdistance == True and l.kind =="5xb")
+        too_many = sum(1 for l in lines if l.longdistance and l.kind =="5xb")
         if line.term[0:3] == "832" or line.term[0:3] == "232":
             i=random.randint(0,10)
             if i >= 5:
@@ -556,19 +548,19 @@ def safetynet():
             doRestartSwitch(reason, s.kind)
 
     for l in lines:
-        if l.pending_call == True:
+        if l.pending_call:
             status = "DialBegin"
             if l.ami_tmr <= 0:
                 l.pending_call = False
                 errorhandle(reason, status)
 
-        if l.pending_dialend == True:
+        if l.pending_dialend:
             status = "DialEnd"
             if l.ami_tmr <= 0:
                 l.pending_dialend = False
                 errorhandle(reason, status)
 
-        if l.pending_hangup == True:
+        if l.pending_hangup:
             status = "Hangup"
             if l.ami_tmr <= 0:
                 l.pending_hangup = False
@@ -618,7 +610,7 @@ def make_switch(args):
             elif o == 'all':
                 originating_switches.extend((Lakeview, Adams, Rainier))
 
-        if args.o == []:
+        if not args.o:
             originating_switches.append(Rainier)
 
     global term_choices
@@ -655,7 +647,7 @@ def make_lines(**kwargs):
 
         new_lines = []
         if source == 'main':
-            if args.a == []:
+            if not args.a:
                 new_lines = [Line(n, switch) for switch in originating_switches for n in range(switch.lines_normal)]
             else:
                 new_lines = [Line(n, switch) for switch in originating_switches for n in range(args.a)]
@@ -721,7 +713,6 @@ class AppSchema(Schema):
     xb5_running = fields.Boolean()
     xb1_running = fields.Boolean()
     ui_running = fields.Boolean()
-    is_paused = fields.Boolean()
     num_lines = fields.Integer()
 
 class LineSchema(Schema):
@@ -763,7 +754,7 @@ def get_info():
     ui_running = False
 
     try:
-        if t_ui.started == True:
+        if t_ui.started:
             ui_running = True
     except Exception as e:
         pass
@@ -771,7 +762,6 @@ def get_info():
     result = dict([
         ('name', __name__),
         ('app_running', t_work.is_alive),
-        ('is_paused', t_work.paused),
         ('ui_running', ui_running),
         ('num_lines', len(lines)),
         ('panel_running', Rainier.running),
@@ -811,12 +801,12 @@ def api_start(**kwargs):
         else:
             logging.warning('I dont know why, but we are starting on %s', switch)
 
-        if t_work.is_alive == True:
+        if t_work.is_alive:
             for i in originating_switches:
                 if switch == i.kind:
-                    if i.running == True:
+                    if i.running:
                         logging.warning("%s is running. Can't start twice.", i.kind)
-                    elif i.running == False:
+                    elif not i.running:
 
                         # Reset the dialing counter for safety.
                         i.is_dialing = 0
@@ -874,7 +864,7 @@ def api_start(**kwargs):
                     result = get_info()
                     return result
     except Exception as e:
-        logging.execption(e)
+        logging.exception(e)
         return False
 
 
@@ -956,7 +946,7 @@ def get_line(ident):
     for l in lines:
         if api_ident == l.ident:
             result = (schema.dump(l))
-    if result == None:
+    if result is None:
         return False
     else:
         return result
@@ -978,7 +968,7 @@ def create_line(**kwargs):
                 lines.append(Line(len(lines), i))
                 result.append(len(lines) - 1)
 
-    if result == []:
+    if not result:
         return False
     else:
         return result
@@ -1002,7 +992,7 @@ def delete_line(**kwargs):
 
     result = get_switch(i.kind)
 
-    if result == []:
+    if not result:
         return False
     else:
         return result
@@ -1017,6 +1007,11 @@ def get_all_switches():
 def get_switch(kind):
     """ Gets the parameters for a particular switch object. """
 
+    try:
+        adapter.Ping()
+    except:
+        return False
+
     schema = SwitchSchema()
     result = []
 
@@ -1029,7 +1024,7 @@ def get_switch(kind):
     if kind == '3ess':
         result.append(schema.dump(ESS3))
 
-    if result == []:
+    if not result:
         return False
     else:
         return result
@@ -1050,7 +1045,7 @@ def create_switch(kind):
         if kind == '3ess':
             originating_switches.append(ESS3)
 
-    if originating_switches != []:
+    if originating_switches:
         return originating_switches
     else:
         return False
@@ -1079,7 +1074,7 @@ def update_switch(**kwargs):
                         # Determine how many lines we have to add or remove.
                         numlines = i.lines_heavy - i.lines_normal
 
-                        if i.running == True:
+                        if i.running:
                             if i.traffic_load == 'heavy':
                                 create_line(switch=i, numlines=numlines)
                             elif i.traffic_load == 'normal':
@@ -1087,7 +1082,7 @@ def update_switch(**kwargs):
                         logging.info("Traffic on %s changed to %s",
                                     i.kind, i.traffic_load)
             result.append(schema.dump(i))
-    if result != []:
+    if result:
         return result
     else:
         return False
@@ -1100,9 +1095,9 @@ def test_call(num_to_dial, ast_channel):
 
     channel = 'DAHDI/{}'.format(ast_channel) + '/wwww%s' % num_to_dial
     logging.info(channel)
-    vars = {'waittime':10}
+    call_vars = {'waittime':10}
 
-    c = Call(channel, variables=vars, callerid='test')
+    c = Call(channel, variables=call_vars, callerid='test')
     con = Context('sarah_callsim', num_to_dial, '1')
     cf = CallFile(c, con)
     cf.spool()
@@ -1133,15 +1128,6 @@ class Screen():
     #Handles user input.
 
         key = stdscr.getch()
-
-        if key == ord(' '):
-            if t_work.paused == False:
-                self.pausescreen()
-                key = stdscr.getch()
-                if key == ord(' '):
-                    self.resumescreen()
-            elif t_work.paused == True:
-                t_work.resume()
         # u: add a line to the first switch.
         if key == ord('u'):
             try:
@@ -1160,37 +1146,6 @@ class Screen():
         self.stdscr.clear()
         curses.resizeterm(y, x)
         self.stdscr.refresh()
-
-    def pausescreen(self):
-        # Draw the PAUSED notification when execution is paused.
-        # Just as importantly, pause the worker thread. Control goes back to
-        # getkey(), which waits for another <spacebar> then resumes.
-
-        y, x = self.stdscr.getmaxyx()
-        half_cols = int(x/2)
-        rows_size = 5
-        x_start_row = y - 9
-        y_start_col = half_cols - int(half_cols / 2)
-
-        logging.info("Paused")
-        t_work.pause()
-        self.stdscr.nodelay(0)
-        pause_scr = self.stdscr.subwin(rows_size, half_cols, x_start_row, y_start_col)
-        pause_scr.box()
-        pause_scr.addstr(2, int(half_cols/2) - 5, "P A U S E D", curses.color_pair(1))
-        pause_scr.bkgd(' ', curses.color_pair(2))
-        self.stdscr.addstr(y-1,0,"Spacebar: pause/resume, ctrl + c: quit", curses.A_BOLD)
-        pause_scr.refresh()
-
-    def resumescreen(self):
-        # This should erase the paused window and refresh the screen.
-
-        t_work.resume()
-        self.stdscr.nodelay(1)
-        self.stdscr.refresh()
-        self.draw(self.stdscr, lines, self.y, self.x)
-        logging.info("Resumed")
-
 
     def draw(self, stdscr, lines, y, x):
         # Output handling. make pretty things.
@@ -1223,7 +1178,7 @@ class Screen():
             except Exception as e:
                 pass
 
-        stdscr.addstr(y-1,0,"Spacebar: pause/resume, ctrl + c: quit", curses.A_BOLD)
+        stdscr.addstr(y-1,0,"Ctrl + C: quit", curses.A_BOLD)
         stdscr.addstr(y-1,x-20,"Lines:",curses.A_BOLD)
         stdscr.addstr(y-1,x-13, str(len(lines)),curses.A_BOLD)
 
@@ -1238,9 +1193,8 @@ class Screen():
 # +-----------------------------------------------+
 
 class ui_thread(threading.Thread):
-    # The UI thread! Besides handling pause and resume, this also
-    # sets up a screen, and calls various things in Screen() to
-    # help with drawing.
+    # The UI thread! Sets up the screen and calls methods in Screen()
+    # to handle input and drawing.
 
     def __init__(self):
 
@@ -1277,20 +1231,8 @@ class ui_thread(threading.Thread):
             stdscr.refresh()
             sleep(1)
 
-    def draw_paused(self):
-        try:
-            screen.pausescreen()
-        except NameError:
-            pass
-
-    def draw_resumed(self):
-        try:
-            screen.resumescreen()
-        except NameError:
-            pass
-
 class work_thread(threading.Thread):
-    # Does all the work! Can be paused and resumed. Handles all of
+    # Does all the work! Handles all of
     # the exciting things, but most important is calling tick()
     # which evaluates the timers and makes call processing decisions.
 
@@ -1298,8 +1240,6 @@ class work_thread(threading.Thread):
 
         threading.Thread.__init__(self)
         self.shutdown_flag = threading.Event()
-        self.paused = False
-        self.paused_flag = threading.Condition(threading.Lock())
 
         # We get here from __main__, and this kicks the loop into gear.
 
@@ -1309,25 +1249,12 @@ class work_thread(threading.Thread):
         try:
             while not self.shutdown_flag.is_set():
                 self.is_alive = True
-                with self.paused_flag:
-                    while self.paused:
-                        self.paused_flag.wait()
-
                 # The main program loop.
-                    for l in lines:
-                        l.tick()
-                    sleep(0.1)
+                for l in lines:
+                    l.tick()
+                sleep(0.1)
         except Exception as e:
             logging.exception(e)
-
-    def pause(self):
-        self.paused = True
-        self.paused_flag.acquire()
-
-    def resume(self):
-        self.paused = False
-        self.paused_flag.notify()
-        self.paused_flag.release()
 
 
 class ServiceExit(Exception):
@@ -1355,22 +1282,13 @@ def module_shutdown():
     print("\n\nShutdown requested. Hanging up Asterisk channels, and cleaning up /var/spool/")
 
 
-if __name__ == "__main__":
-    # Init a bunch of things if we're running as a standalone app.
-    # Set up signal handlers so we can shutdown cleanly later.
-
-    signal.signal(signal.SIGTERM, app_shutdown)
-    signal.signal(signal.SIGINT, app_shutdown)
-
-    paused = None
-
-    config = ConfigParser()
-    config.read('/etc/panel_gen.conf')
-
+def setup(log_level):
+    global config
     global AMI_ADDRESS
     global AMI_PORT
     global AMI_USER
     global AMI_SECRET
+    global NXX
 
     config = ConfigParser()
     config.read('/etc/panel_gen.conf')
@@ -1379,27 +1297,35 @@ if __name__ == "__main__":
     AMI_USER = config.get('ami', 'user')
     AMI_SECRET = config.get('ami', 'secret')
 
-    NXX = list(map(int,config.get('nxx', 'nxx').split(",")))    # Gross!
+    NXX = list(map(int, config.get('nxx', 'nxx').split(",")))
 
     # If logfile does not exist, create it so logging can write to it.
     try:
         with open('/var/log/panel_gen/calls.log', 'a') as file:
             logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s',
-            filename='/var/log/panel_gen/calls.log',level=logging.DEBUG,
+            filename='/var/log/panel_gen/calls.log', level=log_level,
             datefmt='%m/%d/%Y %I:%M:%S %p')
     except IOError:
         with open('/var/log/panel_gen/calls.log', 'w') as file:
             logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s',
-            filename='/var/log/panel_gen/calls.log',level=logging.DEBUG,
+            filename='/var/log/panel_gen/calls.log', level=log_level,
             datefmt='%m/%d/%Y %hh:%M:%S %p')
 
     # Connect to AMI
     try:
         ami_connect(AMI_ADDRESS, AMI_PORT, AMI_USER, AMI_SECRET)
-    except:
-      #  logging.error('AMI connection failed. This will break things.')
-      #  sys.exit('Failed to connect to Asterisk AMI. Is Asterisk running?')
-      logging.error("all that junk", exc_info=True)
+    except Exception:
+        logging.error("all that junk", exc_info=True)
+
+
+if __name__ == "__main__":
+    # Init a bunch of things if we're running as a standalone app.
+    # Set up signal handlers so we can shutdown cleanly later.
+
+    signal.signal(signal.SIGTERM, app_shutdown)
+    signal.signal(signal.SIGINT, app_shutdown)
+
+    setup(logging.DEBUG)
 
     # Parse any arguments the user gave us.
     parse_args()
@@ -1407,7 +1333,7 @@ if __name__ == "__main__":
 
     logging.info('Originating calls on %s', originating_switches)
 
-    if args.t != []:
+    if args.t:
         logging.info('Terminating calls on %s', term_choices)
 
     logging.info('Call volume set to %s', args.v)
@@ -1449,34 +1375,7 @@ if __name__ == "panel_gen":
     # The below gets run if this code is imported as a module.
     # It skips lots of setup steps.
 
-    config = ConfigParser()
-    config.read('/etc/panel_gen.conf')
-    AMI_ADDRESS = config.get('ami', 'address')
-    AMI_PORT = config.get('ami', 'port')
-    AMI_USER = config.get('ami', 'user')
-    AMI_SECRET = config.get('ami', 'secret')
-
-    NXX = list(map(int,config.get('nxx', 'nxx').split(",")))    # Gross!
-
-    # If logfile does not exist, create it so logging can write to it.
-    try:
-        with open('/var/log/panel_gen/calls.log', 'a') as file:
-            logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s',
-            filename='/var/log/panel_gen/calls.log',level=logging.INFO,
-            datefmt='%m/%d/%Y %I:%M:%S %p')
-    except IOError:
-        with open('/var/log/panel_gen/calls.log', 'w') as file:
-            logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s',
-            filename='/var/log/panel_gen/calls.log',level=logging.INFO,
-            datefmt='%m/%d/%Y %hh:%M:%S %p')
-
-    # Connect to AMI
-    try:
-        ami_connect(AMI_ADDRESS, AMI_PORT, AMI_USER, AMI_SECRET)
-    except:
-        #logging.error('AMI connection failed. This will break things.')
-        #sys.exit('Failed to connect to Asterisk AMI. Is Asterisk running?')
-        logging.error("all that junk", exc_info=True)
+    setup(logging.INFO)
 
     # We call parse_args here just to set some defaults. Otherwise
     # not used when running as module.

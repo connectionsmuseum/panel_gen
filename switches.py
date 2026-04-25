@@ -10,8 +10,8 @@ def read_all():
     :return:        sorted list of switches
     """
     result = panel_gen.get_all_switches()
-    
-    if result == False:
+
+    if not result:
         abort(404, "No switches found tho")
     else:
         return result
@@ -26,8 +26,8 @@ def read_one(kind):
 
     result = panel_gen.get_switch(kind)
 
-    if result == False:
-        abort(404, "Switch of type {kind} not found".format(kind=kind))
+    if not result:
+        abort(500, "Internal server error. Could not get status of {kind}.".format(kind=kind))
     else:
         return result
 
@@ -41,7 +41,7 @@ def create(kind):
 
     result = panel_gen.create_switch(kind)
 
-    if result != False:
+    if result:
         return make_response("{kind} successfully created".format(kind=kind), 201)
     else:
         abort(406,"Switch of kind {kind} was not created".format(kind=kind),)
@@ -54,7 +54,7 @@ def update(**kwargs):
 #    """
     result = panel_gen.update_switch(**kwargs)
 
-    if result != False:
+    if result:
         return result
     else:
         abort(406, "Sarah broke something.")

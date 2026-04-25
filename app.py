@@ -9,12 +9,12 @@ def read_status():
     Failure:    Returns 406 Failed to get info
     """
     result = panel_gen.get_info()
-    if result != False:
-       return result
+    if result:
+        return result
     else:
-       abort(
+        abort(
             500,
-            "Failed to get status. Probably an issue with panel_gen",
+            "Failed to get status. Probably an issue with panel_gen.get_info()",
         )
 
 def start(**kwargs):
@@ -67,12 +67,12 @@ def stop(**kwargs):
     try:
         result = panel_gen.api_stop(**kwargs)
 
-        if result != False:
+        if result:
             if source == "web":
                 return 'See Other', 303, {'Location': '/'}
             else:
                 return result
-        elif result == False:
+        else:
             abort(
                 500,
                 "Failed to stop switch. Check api_stop()",

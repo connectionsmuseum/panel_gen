@@ -7,3 +7,4 @@ switches.pyc
 __pycache__
 Pipfile
 Pipfile.lock
+node_modules

@@ -72,7 +72,6 @@ class AppSchema(Schema):
     panel_running = fields.Boolean()
     xb5_running = fields.Boolean()
     ui_running = fields.Boolean()
-    is_paused = fields.Boolean()
     num_lines = fields.Integer()
 
 class LineSchema(Schema):
@@ -311,12 +310,12 @@ class Screen():
             statusbar.bkgd(' ', curses.color_pair(1))
             statusbar.addstr(0, 0, "ctrl + c: quit", curses.A_BOLD)
             statusbar.addstr(0, int(x/4), "Museum status:", curses.A_BOLD)
-            if museum_cstate == True:
+            if museum_cstate:
                 statusbar.addstr(0, int(x/4+15), "ONLINE", curses.color_pair(3))
             else:
                 statusbar.addstr(0, int(x/4+15), "OFFLINE", curses.color_pair(2))
             statusbar.addstr(0, int(x/2), "Server status:", curses.A_BOLD)
-            if server_up == True:
+            if server_up:
                 statusbar.addstr(0, int(x/2+15), "ONLINE", curses.color_pair(3))
             else:
                 statusbar.addstr(0, int(x/2+15), "OFFLINE", curses.color_pair(2))
